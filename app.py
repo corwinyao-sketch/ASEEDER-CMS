@@ -236,6 +236,15 @@ def calculate_duration(start_time, end_time):
     return end_minutes - start_minutes
 
 
+def time_to_minutes(time_obj):
+    return time_obj.hour * 60 + time_obj.minute
+
+
+def minutes_to_time(total_minutes):
+    total_minutes %= 24 * 60
+    return time(total_minutes // 60, total_minutes % 60)
+
+
 def get_booking_window(meeting_date, start_time, end_time):
     start_dt = localize_datetime(meeting_date, start_time)
     end_dt = localize_datetime(meeting_date, end_time)
@@ -446,6 +455,56 @@ def fetch_account_schedule(account_name, account_config, locks):
     }
 
 
+def build_booking_cache_signature(region_accounts, locks, meeting_date):
+    account_signature = tuple(
+        sorted(
+            (
+                account_name,
+                account_config.get("region", ""),
+                account_config.get("account_id", ""),
+                account_config.get("client_id", ""),
+                account_config.get("user_email", ""),
+            )
+            for account_name, account_config in region_accounts.items()
+        )
+    )
+    lock_signature = tuple(
+        sorted(
+            (
+                lock.get("id", ""),
+                lock.get("account_name", ""),
+                lock.get("start_time", ""),
+                lock.get("end_time", ""),
+                lock.get("reason", ""),
+            )
+            for lock in locks
+            if lock.get("account_name") in region_accounts
+        )
+    )
+    return (meeting_date.isoformat(), account_signature, lock_signature)
+
+
+def clear_region_booking_schedule_cache(region):
+    st.session_state.pop(f"{region}_booking_schedule_signature", None)
+    st.session_state.pop(f"{region}_booking_schedule_map", None)
+
+
+def load_booking_schedule_map(region, region_accounts, locks, meeting_date):
+    signature = build_booking_cache_signature(region_accounts, locks, meeting_date)
+    signature_key = f"{region}_booking_schedule_signature"
+    data_key = f"{region}_booking_schedule_map"
+
+    if st.session_state.get(signature_key) != signature:
+        schedule_map = {}
+        with st.spinner("正在加载当天账号占用情况..."):
+            for account_name, account_config in region_accounts.items():
+                schedule_map[account_name] = fetch_account_schedule(account_name, account_config, locks)
+        st.session_state[signature_key] = signature
+        st.session_state[data_key] = schedule_map
+
+    return st.session_state.get(data_key, {})
+
+
 def filter_events_for_date(events, target_date):
     day_start, day_end = get_day_bounds(target_date)
     return [event for event in events if ranges_overlap(event["start_dt"], event["end_dt"], day_start, day_end)]
@@ -647,6 +706,100 @@ def render_availability_results(availability):
                 st.write(f"{prefix} {item['account']}：{item['reason']}")
 
 
+def set_booking_time_range(region, slot_minutes, duration_minutes):
+    st.session_state[f"{region}_start_time"] = minutes_to_time(slot_minutes)
+    st.session_state[f"{region}_end_time"] = minutes_to_time(slot_minutes + duration_minutes)
+
+
+def build_quick_slot_stats(schedule_map, meeting_date, duration_minutes):
+    slot_stats = []
+
+    for slot_minutes in range(0, 24 * 60, 30):
+        slot_start = localize_datetime(meeting_date, minutes_to_time(slot_minutes))
+        slot_end = slot_start + timedelta(minutes=duration_minutes)
+        available_accounts = []
+        blocked_accounts = []
+        error_accounts = []
+
+        for account_name, schedule in schedule_map.items():
+            if schedule.get("error"):
+                error_accounts.append(account_name)
+                continue
+
+            overlapping_events = filter_events_for_window(schedule.get("events", []), slot_start, slot_end)
+            if overlapping_events:
+                blocked_accounts.append((account_name, overlapping_events[0]))
+            else:
+                available_accounts.append(account_name)
+
+        slot_stats.append(
+            {
+                "slot_minutes": slot_minutes,
+                "slot_start": slot_start,
+                "slot_end": slot_end,
+                "available_accounts": available_accounts,
+                "blocked_accounts": blocked_accounts,
+                "error_accounts": error_accounts,
+                "available_count": len(available_accounts),
+                "total_count": len(schedule_map),
+            }
+        )
+
+    return slot_stats
+
+
+def render_quick_time_grid(region, meeting_date, duration_minutes, schedule_map):
+    st.markdown("### ⚡ 快速时间预定")
+    st.caption("半小时为一格。点击绿色方格会同步开始/结束时间；灰色方格表示当前时段没有可用账号。")
+
+    slot_stats = build_quick_slot_stats(schedule_map, meeting_date, duration_minutes)
+    selected_slot_minutes = time_to_minutes(st.session_state[f"{region}_start_time"])
+    selected_duration = calculate_duration(
+        st.session_state[f"{region}_start_time"],
+        st.session_state[f"{region}_end_time"],
+    )
+
+    error_count = len([1 for schedule in schedule_map.values() if schedule.get("error")])
+    if error_count:
+        st.warning(f"当前有 {error_count} 个账号未能拉取日程，方格可用性按已成功拉取的账号计算。")
+
+    slots_per_row = 6
+    for row_start in range(0, len(slot_stats), slots_per_row):
+        columns = st.columns(slots_per_row)
+        for column, slot in zip(columns, slot_stats[row_start:row_start + slots_per_row]):
+            is_selected = (
+                slot["slot_minutes"] == selected_slot_minutes and duration_minutes == selected_duration
+            )
+            is_available = slot["available_count"] > 0
+            button_label = (
+                f"{'🟦' if is_selected else '🟢' if is_available else '⚪'} "
+                f"{slot['slot_start'].strftime('%H:%M')} ({slot['available_count']}/{slot['total_count']})"
+            )
+
+            help_parts = [
+                f"时间段：{format_range(slot['slot_start'], slot['slot_end'])}",
+                f"可用账号：{slot['available_count']}/{slot['total_count']}",
+            ]
+            if slot["available_accounts"]:
+                help_parts.append(f"可预约账号：{', '.join(slot['available_accounts'])}")
+            if slot["blocked_accounts"]:
+                first_block = slot["blocked_accounts"][0][1]
+                help_parts.append(f"示例占用：{describe_conflict(first_block)}")
+            if slot["error_accounts"]:
+                help_parts.append(f"拉取失败：{', '.join(slot['error_accounts'])}")
+
+            column.button(
+                button_label,
+                key=f"{region}_slot_{slot['slot_minutes']}_{duration_minutes}",
+                type="primary" if is_selected else "secondary",
+                use_container_width=True,
+                disabled=not is_available,
+                help="\n".join(help_parts),
+                on_click=set_booking_time_range,
+                args=(region, slot["slot_minutes"], duration_minutes),
+            )
+
+
 def get_hour_event(events, target_date, hour):
     hour_start = localize_datetime(target_date, time(hour, 0))
     hour_end = hour_start + timedelta(hours=1)
@@ -784,24 +937,52 @@ def render_region_booking(region, region_accounts, locks):
         st.warning("当前地区没有可用账号，请先到管理员页添加并配置账号。")
         return
 
+    date_key = f"{region}_meeting_date"
+    start_key = f"{region}_start_time"
+    end_key = f"{region}_end_time"
+
+    if date_key not in st.session_state:
+        st.session_state[date_key] = datetime.now().date()
+    if start_key not in st.session_state:
+        st.session_state[start_key] = time(19, 0)
+    if end_key not in st.session_state:
+        st.session_state[end_key] = time(20, 0)
+
     st.caption(f"当前地区：**{region}**，可调度账号池：**{len(region_accounts)}** 个")
 
     topic = st.text_input("会议主题", placeholder="例如：SA meeting 4:Kelly——Qingqing", key=f"{region}_topic")
-    meeting_date = st.date_input("会议日期", value=datetime.now().date(), key=f"{region}_meeting_date")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        start_time = st.time_input("开始时间", value=time(19, 0), key=f"{region}_start_time")
-    with col2:
-        end_time = st.time_input("结束时间", value=time(20, 0), key=f"{region}_end_time")
+    picker_col, calendar_col = st.columns([1, 1.15])
+    with picker_col:
+        start_time = st.time_input("开始时间", key=start_key, step=1800)
+        end_time = st.time_input("结束时间", key=end_key, step=1800)
+    with calendar_col:
+        meeting_date = st.date_input(
+            "会议日期",
+            key=date_key,
+            help="点击打开日历，直接选择要预约的日期。",
+        )
 
     duration = calculate_duration(start_time, end_time)
     st.caption(f"会议时长：{duration} 分钟")
+    st.caption(
+        f"当前选择：**{meeting_date.strftime('%Y-%m-%d')}** "
+        f"**{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}**"
+    )
 
-    if st.button("检查可用账号", key=f"{region}_check_accounts"):
-        with st.spinner("正在检查当前地区账号占用情况..."):
-            availability = evaluate_region_availability(region_accounts, locks, meeting_date, start_time, end_time)
-        render_availability_results(availability)
+    action_col, refresh_col = st.columns([5, 1])
+    with refresh_col:
+        if st.button("刷新方格", key=f"{region}_refresh_booking_grid", use_container_width=True):
+            clear_region_booking_schedule_cache(region)
+
+    schedule_map = load_booking_schedule_map(region, region_accounts, locks, meeting_date)
+    render_quick_time_grid(region, meeting_date, duration, schedule_map)
+
+    with action_col:
+        if st.button("检查可用账号", key=f"{region}_check_accounts"):
+            with st.spinner("正在检查当前地区账号占用情况..."):
+                availability = evaluate_region_availability(region_accounts, locks, meeting_date, start_time, end_time)
+            render_availability_results(availability)
 
     if st.button("预约会议", key=f"{region}_book_meeting", type="primary"):
         if not topic.strip():
@@ -834,6 +1015,7 @@ def render_region_booking(region, region_accounts, locks):
 
             output = format_booking_output(topic.strip(), meeting, meeting_date, start_time)
             add_meeting_record(selected_account, region, meeting, output)
+            clear_region_booking_schedule_cache(region)
             st.success(f"会议预约成功！地区：{region}，分配账号：{selected_account}")
             st.code(output, language=None)
         except requests.exceptions.HTTPError as exc:
