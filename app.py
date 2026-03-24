@@ -1,6 +1,7 @@
 import html
 import json
 import os
+import calendar
 from base64 import b64encode
 from datetime import datetime, time, timedelta
 from uuid import uuid4
@@ -243,6 +244,16 @@ def time_to_minutes(time_obj):
 def minutes_to_time(total_minutes):
     total_minutes %= 24 * 60
     return time(total_minutes // 60, total_minutes % 60)
+
+
+def month_start(date_obj):
+    return date_obj.replace(day=1)
+
+
+def shift_month(date_obj, delta):
+    year = date_obj.year + ((date_obj.month - 1 + delta) // 12)
+    month = ((date_obj.month - 1 + delta) % 12) + 1
+    return date_obj.replace(year=year, month=month, day=1)
 
 
 def get_booking_window(meeting_date, start_time, end_time):
@@ -491,6 +502,19 @@ def clear_region_booking_schedule_cache(region):
 
 def clear_booking_anchor(region):
     st.session_state.pop(f"{region}_booking_anchor_minutes", None)
+
+
+def set_booking_date(region, selected_date):
+    st.session_state[f"{region}_meeting_date"] = selected_date
+    st.session_state[f"{region}_calendar_visible_month"] = month_start(selected_date)
+    clear_region_booking_schedule_cache(region)
+    clear_booking_anchor(region)
+
+
+def change_booking_visible_month(region, delta):
+    month_key = f"{region}_calendar_visible_month"
+    current_month = st.session_state.get(month_key, month_start(st.session_state[f"{region}_meeting_date"]))
+    st.session_state[month_key] = shift_month(current_month, delta)
 
 
 def load_booking_schedule_map(region, region_accounts, locks, meeting_date):
@@ -858,6 +882,86 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
     legend_cols[2].caption("灰色不可点格子表示当前半小时内没有任何可用账号。")
 
 
+def render_persistent_calendar(region):
+    date_key = f"{region}_meeting_date"
+    month_key = f"{region}_calendar_visible_month"
+    selected_date = st.session_state[date_key]
+    visible_month = st.session_state.get(month_key, month_start(selected_date))
+    st.session_state[month_key] = visible_month
+
+    st.markdown("### 📅 会议日期")
+    header_cols = st.columns([1, 3, 1])
+    with header_cols[0]:
+        st.button(
+            "◀",
+            key=f"{region}_calendar_prev_month",
+            use_container_width=True,
+            on_click=change_booking_visible_month,
+            args=(region, -1),
+        )
+    with header_cols[1]:
+        st.markdown(
+            f"<div style='text-align:center;font-weight:600;padding-top:0.35rem'>{visible_month.strftime('%Y年%m月')}</div>",
+            unsafe_allow_html=True,
+        )
+    with header_cols[2]:
+        st.button(
+            "▶",
+            key=f"{region}_calendar_next_month",
+            use_container_width=True,
+            on_click=change_booking_visible_month,
+            args=(region, 1),
+        )
+
+    st.markdown(
+        """
+        <style>
+        .booking-calendar-weekdays {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 0.35rem;
+            margin: 0.35rem 0 0.25rem;
+            color: #6b7280;
+            font-size: 0.82rem;
+            text-align: center;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='booking-calendar-weekdays'><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    month_weeks = calendar.monthcalendar(visible_month.year, visible_month.month)
+    today = datetime.now().date()
+    for week_index, week in enumerate(month_weeks):
+        day_columns = st.columns(7, gap="small")
+        for day_index, day_number in enumerate(week):
+            if day_number == 0:
+                day_columns[day_index].markdown("&nbsp;", unsafe_allow_html=True)
+                continue
+
+            day_date = visible_month.replace(day=day_number)
+            is_selected = day_date == selected_date
+            is_today = day_date == today
+            label = f"{day_number}"
+            if is_today:
+                label = f"{day_number}·今"
+
+            day_columns[day_index].button(
+                label,
+                key=f"{region}_calendar_day_{visible_month.year}_{visible_month.month}_{week_index}_{day_index}",
+                use_container_width=True,
+                type="primary" if is_selected else "secondary",
+                on_click=set_booking_date,
+                args=(region, day_date),
+            )
+
+    st.caption(f"已选日期：{selected_date.strftime('%Y-%m-%d')}")
+
+
 def get_hour_event(events, target_date, hour):
     hour_start = localize_datetime(target_date, time(hour, 0))
     hour_end = hour_start + timedelta(hours=1)
@@ -1005,39 +1109,38 @@ def render_region_booking(region, region_accounts, locks):
         st.session_state[start_key] = time(19, 0)
     if end_key not in st.session_state:
         st.session_state[end_key] = time(20, 0)
+    month_key = f"{region}_calendar_visible_month"
+    if month_key not in st.session_state:
+        st.session_state[month_key] = month_start(st.session_state[date_key])
 
     st.caption(f"当前地区：**{region}**，可调度账号池：**{len(region_accounts)}** 个")
 
     topic = st.text_input("会议主题", placeholder="例如：SA meeting 4:Kelly——Qingqing", key=f"{region}_topic")
 
     picker_col, calendar_col = st.columns([1, 1.15])
+    with calendar_col:
+        render_persistent_calendar(region)
+
+    meeting_date = st.session_state[date_key]
+    schedule_map = load_booking_schedule_map(region, region_accounts, locks, meeting_date)
+
     with picker_col:
         start_time = st.time_input("开始时间", key=start_key, step=1800, on_change=clear_booking_anchor, args=(region,))
         end_time = st.time_input("结束时间", key=end_key, step=1800, on_change=clear_booking_anchor, args=(region,))
-    with calendar_col:
-        meeting_date = st.date_input(
-            "会议日期",
-            key=date_key,
-            help="点击打开日历，直接选择要预约的日期。",
-            on_change=clear_booking_anchor,
-            args=(region,),
-        )
 
-    duration = calculate_duration(start_time, end_time)
-    st.caption(f"会议时长：{duration} 分钟")
-    st.caption(
-        f"当前选择：**{meeting_date.strftime('%Y-%m-%d')}** "
-        f"**{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}**"
-    )
+        duration = calculate_duration(start_time, end_time)
+        st.caption(f"会议时长：{duration} 分钟")
+        st.caption(
+            f"当前选择：**{meeting_date.strftime('%Y-%m-%d')}** "
+            f"**{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}**"
+        )
+        render_quick_time_grid(region, meeting_date, schedule_map)
 
     action_col, refresh_col = st.columns([5, 1])
     with refresh_col:
         if st.button("刷新方格", key=f"{region}_refresh_booking_grid", use_container_width=True):
             clear_region_booking_schedule_cache(region)
             clear_booking_anchor(region)
-
-    schedule_map = load_booking_schedule_map(region, region_accounts, locks, meeting_date)
-    render_quick_time_grid(region, meeting_date, schedule_map)
 
     with action_col:
         if st.button("检查可用账号", key=f"{region}_check_accounts"):
