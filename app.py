@@ -1054,11 +1054,14 @@ def render_persistent_calendar(region):
         .booking-calendar-weekdays {
             display: grid;
             grid-template-columns: repeat(7, minmax(0, 1fr));
-            gap: 0.35rem;
-            margin: 0.35rem 0 0.25rem;
+            gap: 0.15rem;
+            margin: 0.2rem 0 0.15rem;
             color: #6b7280;
-            font-size: 0.82rem;
+            font-size: 0.72rem;
             text-align: center;
+        }
+        .booking-calendar-weekdays span {
+            line-height: 1.1;
         }
         </style>
         """,
@@ -1070,7 +1073,6 @@ def render_persistent_calendar(region):
     )
 
     month_weeks = calendar.monthcalendar(visible_month.year, visible_month.month)
-    today = datetime.now().date()
     for week_index, week in enumerate(month_weeks):
         day_columns = st.columns(7, gap="small")
         for day_index, day_number in enumerate(week):
@@ -1080,13 +1082,9 @@ def render_persistent_calendar(region):
 
             day_date = visible_month.replace(day=day_number)
             is_selected = day_date == selected_date
-            is_today = day_date == today
-            label = f"{day_number}"
-            if is_today:
-                label = f"{day_number}·今"
 
             day_columns[day_index].button(
-                label,
+                str(day_number),
                 key=f"{region}_calendar_day_{visible_month.year}_{visible_month.month}_{week_index}_{day_index}",
                 use_container_width=True,
                 type="primary" if is_selected else "secondary",
