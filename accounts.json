@@ -1,0 +1,16 @@
+{
+    "华东3": {
+        "account_id": "sRceTGFlRvC18IO5O3aOtA",
+        "client_id": "_uh7H8CUQCq0i8LyCO632g",
+        "client_secret": "KamWROj6PrKRimnyNY3VYhY7a8jelRce",
+        "region": "华东",
+        "user_email": ""
+    },
+    "华东2": {
+        "account_id": "sRceTGFlRvC18IO5O3aOtA",
+        "client_id": "MGDCLY0iQ3mlFeNj3BMQTw",
+        "client_secret": "SDAVsK1xju6Jsr9dhtKbr2QxOuQBTKux",
+        "region": "华东",
+        "user_email": ""
+    }
+}
