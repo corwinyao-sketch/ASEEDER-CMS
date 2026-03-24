@@ -489,6 +489,10 @@ def clear_region_booking_schedule_cache(region):
     st.session_state.pop(f"{region}_booking_schedule_map", None)
 
 
+def clear_booking_anchor(region):
+    st.session_state.pop(f"{region}_booking_anchor_minutes", None)
+
+
 def load_booking_schedule_map(region, region_accounts, locks, meeting_date):
     signature = build_booking_cache_signature(region_accounts, locks, meeting_date)
     signature_key = f"{region}_booking_schedule_signature"
@@ -711,12 +715,37 @@ def set_booking_time_range(region, slot_minutes, duration_minutes):
     st.session_state[f"{region}_end_time"] = minutes_to_time(slot_minutes + duration_minutes)
 
 
-def build_quick_slot_stats(schedule_map, meeting_date, duration_minutes):
+def handle_booking_slot_click(region, slot_minutes):
+    anchor_key = f"{region}_booking_anchor_minutes"
+    anchor_minutes = st.session_state.get(anchor_key)
+
+    if anchor_minutes is None:
+        st.session_state[anchor_key] = slot_minutes
+        st.session_state[f"{region}_start_time"] = minutes_to_time(slot_minutes)
+        st.session_state[f"{region}_end_time"] = minutes_to_time(slot_minutes + 30)
+        return
+
+    start_minutes = min(anchor_minutes, slot_minutes)
+    end_minutes = max(anchor_minutes, slot_minutes) + 30
+    st.session_state[f"{region}_start_time"] = minutes_to_time(start_minutes)
+    st.session_state[f"{region}_end_time"] = minutes_to_time(end_minutes)
+    st.session_state.pop(anchor_key, None)
+
+
+def get_selected_range_minutes(region):
+    start_minutes = time_to_minutes(st.session_state[f"{region}_start_time"])
+    end_minutes = time_to_minutes(st.session_state[f"{region}_end_time"])
+    if end_minutes <= start_minutes:
+        end_minutes += 24 * 60
+    return start_minutes, end_minutes
+
+
+def build_quick_slot_stats(schedule_map, meeting_date):
     slot_stats = []
 
     for slot_minutes in range(0, 24 * 60, 30):
         slot_start = localize_datetime(meeting_date, minutes_to_time(slot_minutes))
-        slot_end = slot_start + timedelta(minutes=duration_minutes)
+        slot_end = slot_start + timedelta(minutes=30)
         available_accounts = []
         blocked_accounts = []
         error_accounts = []
@@ -748,56 +777,85 @@ def build_quick_slot_stats(schedule_map, meeting_date, duration_minutes):
     return slot_stats
 
 
-def render_quick_time_grid(region, meeting_date, duration_minutes, schedule_map):
-    st.markdown("### ⚡ 快速时间预定")
-    st.caption("半小时为一格。点击绿色方格会同步开始/结束时间；灰色方格表示当前时段没有可用账号。")
+def render_quick_time_grid(region, meeting_date, schedule_map):
+    st.markdown("### ⚡ 连续时间预定")
+    st.caption("半小时为一格。先点开始格，再点结束格，即可连续选择一整段时间。")
 
-    slot_stats = build_quick_slot_stats(schedule_map, meeting_date, duration_minutes)
-    selected_slot_minutes = time_to_minutes(st.session_state[f"{region}_start_time"])
-    selected_duration = calculate_duration(
-        st.session_state[f"{region}_start_time"],
-        st.session_state[f"{region}_end_time"],
-    )
+    slot_stats = build_quick_slot_stats(schedule_map, meeting_date)
+    selected_start, selected_end = get_selected_range_minutes(region)
+    anchor_minutes = st.session_state.get(f"{region}_booking_anchor_minutes")
 
     error_count = len([1 for schedule in schedule_map.values() if schedule.get("error")])
     if error_count:
-        st.warning(f"当前有 {error_count} 个账号未能拉取日程，方格可用性按已成功拉取的账号计算。")
+        st.warning(f"当前有 {error_count} 个账号未能拉取日程，时间条可用性按已成功拉取的账号计算。")
 
-    slots_per_row = 6
-    for row_start in range(0, len(slot_stats), slots_per_row):
-        columns = st.columns(slots_per_row)
-        for column, slot in zip(columns, slot_stats[row_start:row_start + slots_per_row]):
-            is_selected = (
-                slot["slot_minutes"] == selected_slot_minutes and duration_minutes == selected_duration
-            )
-            is_available = slot["available_count"] > 0
-            button_label = (
-                f"{'🟦' if is_selected else '🟢' if is_available else '⚪'} "
-                f"{slot['slot_start'].strftime('%H:%M')} ({slot['available_count']}/{slot['total_count']})"
-            )
+    if anchor_minutes is not None:
+        st.info(f"已选择开始时间 {minutes_to_time(anchor_minutes).strftime('%H:%M')}，请再点击一个格子作为结束时间。")
 
-            help_parts = [
-                f"时间段：{format_range(slot['slot_start'], slot['slot_end'])}",
-                f"可用账号：{slot['available_count']}/{slot['total_count']}",
-            ]
-            if slot["available_accounts"]:
-                help_parts.append(f"可预约账号：{', '.join(slot['available_accounts'])}")
-            if slot["blocked_accounts"]:
-                first_block = slot["blocked_accounts"][0][1]
-                help_parts.append(f"示例占用：{describe_conflict(first_block)}")
-            if slot["error_accounts"]:
-                help_parts.append(f"拉取失败：{', '.join(slot['error_accounts'])}")
+    toolbar_cols = st.columns([5, 1])
+    with toolbar_cols[1]:
+        if st.button("清除选段", key=f"{region}_clear_booking_selection", use_container_width=True):
+            clear_booking_anchor(region)
 
-            column.button(
-                button_label,
-                key=f"{region}_slot_{slot['slot_minutes']}_{duration_minutes}",
-                type="primary" if is_selected else "secondary",
-                use_container_width=True,
-                disabled=not is_available,
-                help="\n".join(help_parts),
-                on_click=set_booking_time_range,
-                args=(region, slot["slot_minutes"], duration_minutes),
-            )
+    st.markdown(
+        """
+        <style>
+        .quick-time-label-row {
+            display: grid;
+            grid-template-columns: repeat(25, minmax(0, 1fr));
+            gap: 0.25rem;
+            margin-top: 0.2rem;
+            color: #6b7280;
+            font-size: 0.85rem;
+        }
+        .quick-time-label-row span {
+            text-align: left;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    slot_columns = st.columns(48, gap="small")
+    for column, slot in zip(slot_columns, slot_stats):
+        slot_minutes = slot["slot_minutes"]
+        is_selected = selected_start <= slot_minutes < selected_end
+        is_available = slot["available_count"] > 0
+        button_label = "■" if is_selected else "·"
+
+        help_parts = [
+            f"时间段：{format_range(slot['slot_start'], slot['slot_end'])}",
+            f"可用账号：{slot['available_count']}/{slot['total_count']}",
+        ]
+        if slot["available_accounts"]:
+            help_parts.append(f"可预约账号：{', '.join(slot['available_accounts'])}")
+        if slot["blocked_accounts"]:
+            first_block = slot["blocked_accounts"][0][1]
+            help_parts.append(f"示例占用：{describe_conflict(first_block)}")
+        if slot["error_accounts"]:
+            help_parts.append(f"拉取失败：{', '.join(slot['error_accounts'])}")
+
+        column.button(
+            button_label,
+            key=f"{region}_slot_{slot_minutes}",
+            type="primary" if is_selected else "secondary",
+            use_container_width=True,
+            disabled=not is_available,
+            help="\n".join(help_parts),
+            on_click=handle_booking_slot_click,
+            args=(region, slot_minutes),
+        )
+
+    label_html = "<div class='quick-time-label-row'>"
+    for hour in range(25):
+        label_html += f"<span>{hour}</span>"
+    label_html += "</div>"
+    st.markdown(label_html, unsafe_allow_html=True)
+
+    legend_cols = st.columns([1, 1, 6])
+    legend_cols[0].markdown("`■` 已选")
+    legend_cols[1].markdown("`·` 可选")
+    legend_cols[2].caption("灰色不可点格子表示当前半小时内没有任何可用账号。")
 
 
 def get_hour_event(events, target_date, hour):
@@ -954,13 +1012,15 @@ def render_region_booking(region, region_accounts, locks):
 
     picker_col, calendar_col = st.columns([1, 1.15])
     with picker_col:
-        start_time = st.time_input("开始时间", key=start_key, step=1800)
-        end_time = st.time_input("结束时间", key=end_key, step=1800)
+        start_time = st.time_input("开始时间", key=start_key, step=1800, on_change=clear_booking_anchor, args=(region,))
+        end_time = st.time_input("结束时间", key=end_key, step=1800, on_change=clear_booking_anchor, args=(region,))
     with calendar_col:
         meeting_date = st.date_input(
             "会议日期",
             key=date_key,
             help="点击打开日历，直接选择要预约的日期。",
+            on_change=clear_booking_anchor,
+            args=(region,),
         )
 
     duration = calculate_duration(start_time, end_time)
@@ -974,9 +1034,10 @@ def render_region_booking(region, region_accounts, locks):
     with refresh_col:
         if st.button("刷新方格", key=f"{region}_refresh_booking_grid", use_container_width=True):
             clear_region_booking_schedule_cache(region)
+            clear_booking_anchor(region)
 
     schedule_map = load_booking_schedule_map(region, region_accounts, locks, meeting_date)
-    render_quick_time_grid(region, meeting_date, duration, schedule_map)
+    render_quick_time_grid(region, meeting_date, schedule_map)
 
     with action_col:
         if st.button("检查可用账号", key=f"{region}_check_accounts"):
