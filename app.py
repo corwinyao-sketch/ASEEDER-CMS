@@ -734,6 +734,143 @@ def render_availability_results(availability):
                 st.write(f"{prefix} {item['account']}：{item['reason']}")
 
 
+def evaluate_availability_from_schedule_map(schedule_map, meeting_date, start_time, end_time):
+    target_start, target_end = get_booking_window(meeting_date, start_time, end_time)
+    day_start, day_end = get_day_bounds(meeting_date)
+    results = []
+
+    for account_name, schedule in sorted(schedule_map.items()):
+        day_meeting_count = len(
+            [
+                event
+                for event in schedule.get("meeting_events", [])
+                if ranges_overlap(event["start_dt"], event["end_dt"], day_start, day_end)
+            ]
+        )
+
+        if schedule.get("error"):
+            results.append(
+                {
+                    "account": account_name,
+                    "status": "error",
+                    "reason": f"拉取失败: {schedule['error']}",
+                    "meeting_count": day_meeting_count,
+                    "schedule": schedule,
+                }
+            )
+            continue
+
+        overlapping_events = filter_events_for_window(schedule.get("events", []), target_start, target_end)
+        if overlapping_events:
+            conflict = sort_events(overlapping_events)[0]
+            results.append(
+                {
+                    "account": account_name,
+                    "status": "busy",
+                    "reason": describe_conflict(conflict),
+                    "meeting_count": day_meeting_count,
+                    "schedule": schedule,
+                }
+            )
+        else:
+            results.append(
+                {
+                    "account": account_name,
+                    "status": "available",
+                    "reason": f"当天已有 {day_meeting_count} 场会议",
+                    "meeting_count": day_meeting_count,
+                    "schedule": schedule,
+                }
+            )
+
+    available_accounts = [item for item in results if item["status"] == "available"]
+    recommended = None
+    if available_accounts:
+        recommended = sorted(available_accounts, key=lambda item: (item["meeting_count"], item["account"]))[0]
+
+    return {
+        "results": results,
+        "available": available_accounts,
+        "recommended": recommended,
+        "target_start": target_start,
+        "target_end": target_end,
+    }
+
+
+def render_account_availability_preview(availability):
+    st.markdown("##### 可用账号")
+
+    available_accounts = availability["available"]
+    if not available_accounts:
+        st.warning("当前时间段没有可用账号。")
+        return
+
+    st.markdown(
+        """
+        <style>
+        .availability-chip-row {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-top: 0.25rem;
+        }
+        .availability-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+            padding: 0.75rem 1rem;
+            border-radius: 999px;
+            border: 1px solid #d1d5db;
+            background: #ffffff;
+            color: #111827;
+            font-weight: 600;
+            min-width: 148px;
+        }
+        .availability-chip .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: #22c55e;
+            display: inline-block;
+        }
+        .availability-chip.recommended {
+            border: 2px solid #e11d48;
+            color: #111827;
+        }
+        .availability-chip.recommended .dot {
+            background: #e11d48;
+        }
+        .availability-chip .badge {
+            margin-left: auto;
+            color: #e11d48;
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    recommended_account = availability["recommended"]["account"] if availability["recommended"] else None
+    chip_html = "<div class='availability-chip-row'>"
+    for item in sorted(available_accounts, key=lambda entry: (entry["account"] != recommended_account, entry["account"])):
+        recommended_class = " recommended" if item["account"] == recommended_account else ""
+        badge_html = "<span class='badge'>✓</span>" if item["account"] == recommended_account else ""
+        chip_html += (
+            f"<div class='availability-chip{recommended_class}'>"
+            f"<span class='dot'></span>"
+            f"<span>{html.escape(item['account'])}</span>"
+            f"{badge_html}"
+            f"</div>"
+        )
+    chip_html += "</div>"
+    st.markdown(chip_html, unsafe_allow_html=True)
+    st.caption(
+        f"推荐账号：{recommended_account}。按当天会议数量最少优先自动分配。"
+        if recommended_account
+        else ""
+    )
+
+
 def set_booking_time_range(region, slot_minutes, duration_minutes):
     st.session_state[f"{region}_start_time"] = minutes_to_time(slot_minutes)
     st.session_state[f"{region}_end_time"] = minutes_to_time(slot_minutes + duration_minutes)
@@ -802,9 +939,6 @@ def build_quick_slot_stats(schedule_map, meeting_date):
 
 
 def render_quick_time_grid(region, meeting_date, schedule_map):
-    st.markdown("### ⚡ 连续时间预定")
-    st.caption("半小时为一格。先点开始格，再点结束格，即可连续选择一整段时间。")
-
     slot_stats = build_quick_slot_stats(schedule_map, meeting_date)
     selected_start, selected_end = get_selected_range_minutes(region)
     anchor_minutes = st.session_state.get(f"{region}_booking_anchor_minutes")
@@ -824,17 +958,13 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
     st.markdown(
         """
         <style>
-        .quick-time-strip-title {
-            margin-bottom: 0.35rem;
-        }
         .quick-time-strip-axis {
-            margin-top: 0.25rem;
+            margin-bottom: 0.2rem;
         }
         .quick-time-label-row {
             display: grid;
-            grid-template-columns: repeat(25, minmax(0, 1fr));
-            gap: 0.15rem;
-            margin-top: 0.15rem;
+            grid-template-columns: repeat(24, minmax(0, 1fr));
+            gap: 0.2rem;
             color: #6b7280;
             font-size: 0.75rem;
         }
@@ -846,17 +976,18 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
         unsafe_allow_html=True,
     )
 
+    label_html = "<div class='quick-time-strip-axis'><div class='quick-time-label-row'>"
+    for hour in range(24):
+        label_html += f"<span>{hour}</span>"
+    label_html += "</div></div>"
+    st.markdown(label_html, unsafe_allow_html=True)
+
     slot_columns = st.columns(48, gap="small")
     for column, slot in zip(slot_columns, slot_stats):
         slot_minutes = slot["slot_minutes"]
         is_selected = selected_start <= slot_minutes < selected_end
         is_available = slot["available_count"] > 0
-        if is_selected:
-            button_label = "🟦"
-        elif is_available:
-            button_label = "🟩"
-        else:
-            button_label = "⬜"
+        button_label = "■"
 
         help_parts = [
             f"时间段：{format_range(slot['slot_start'], slot['slot_end'])}",
@@ -881,16 +1012,10 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
             args=(region, slot_minutes),
         )
 
-    label_html = "<div class='quick-time-strip-axis'><div class='quick-time-label-row'>"
-    for hour in range(25):
-        label_html += f"<span>{hour}</span>"
-    label_html += "</div></div>"
-    st.markdown(label_html, unsafe_allow_html=True)
-
     legend_cols = st.columns([1, 1, 6])
-    legend_cols[0].markdown("`🟦` 已选")
-    legend_cols[1].markdown("`🟩` 可选")
-    legend_cols[2].caption("`⬜` 不可用。点击一次选开始，再点一次选结束。")
+    legend_cols[0].markdown("`■` 已选")
+    legend_cols[1].markdown("`■` 可点")
+    legend_cols[2].caption("灰色小方格不可用。点击一次选开始，再点一次选结束。")
 
 
 def render_persistent_calendar(region):
@@ -900,7 +1025,6 @@ def render_persistent_calendar(region):
     visible_month = st.session_state.get(month_key, month_start(selected_date))
     st.session_state[month_key] = visible_month
 
-    st.markdown("### 📅 会议日期")
     header_cols = st.columns([1, 3, 1])
     with header_cols[0]:
         st.button(
@@ -1105,7 +1229,7 @@ def fetch_region_api_records(region_accounts, query_start_date, query_end_date):
 
 
 def render_region_booking(region, region_accounts, locks):
-    st.subheader("📝 预约会议")
+    st.subheader("会议预定")
     if not region_accounts:
         st.warning("当前地区没有可用账号，请先到管理员页添加并配置账号。")
         return
@@ -1126,9 +1250,7 @@ def render_region_booking(region, region_accounts, locks):
 
     st.caption(f"当前地区：**{region}**，可调度账号池：**{len(region_accounts)}** 个")
 
-    topic = st.text_input("会议主题", placeholder="例如：SA meeting 4:Kelly——Qingqing", key=f"{region}_topic")
-
-    picker_col, calendar_col = st.columns([1.65, 0.75])
+    picker_col, calendar_col = st.columns([1.7, 1])
     with calendar_col:
         render_persistent_calendar(region)
 
@@ -1136,30 +1258,57 @@ def render_region_booking(region, region_accounts, locks):
     schedule_map = load_booking_schedule_map(region, region_accounts, locks, meeting_date)
 
     with picker_col:
-        start_time = st.time_input("开始时间", key=start_key, step=1800, on_change=clear_booking_anchor, args=(region,))
-        end_time = st.time_input("结束时间", key=end_key, step=1800, on_change=clear_booking_anchor, args=(region,))
+        st.markdown("##### 会议主题")
+        topic = st.text_input(
+            "会议主题",
+            placeholder="请输入会议名称或讨论主题",
+            key=f"{region}_topic",
+            label_visibility="collapsed",
+        )
+
+        st.markdown("##### 时间轴")
+        timeline_placeholder = st.empty()
+
+        time_col1, time_col2 = st.columns(2)
+        with time_col1:
+            start_time = st.time_input("开始时间", key=start_key, step=1800, on_change=clear_booking_anchor, args=(region,))
+        with time_col2:
+            end_time = st.time_input("结束时间", key=end_key, step=1800, on_change=clear_booking_anchor, args=(region,))
 
         duration = calculate_duration(start_time, end_time)
-        st.caption(f"会议时长：{duration} 分钟")
+        with timeline_placeholder.container():
+            render_quick_time_grid(region, meeting_date, schedule_map)
+
         st.caption(
             f"当前选择：**{meeting_date.strftime('%Y-%m-%d')}** "
-            f"**{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}**"
+            f"**{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}**，会议时长 **{duration}** 分钟"
         )
-        render_quick_time_grid(region, meeting_date, schedule_map)
 
-    action_col, refresh_col = st.columns([5, 1])
+        preview_availability = evaluate_availability_from_schedule_map(
+            schedule_map,
+            meeting_date,
+            start_time,
+            end_time,
+        )
+        st.markdown("---")
+        render_account_availability_preview(preview_availability)
+
+    action_col, check_col, refresh_col = st.columns([4, 2.2, 1.2])
     with refresh_col:
         if st.button("刷新方格", key=f"{region}_refresh_booking_grid", use_container_width=True):
             clear_region_booking_schedule_cache(region)
             clear_booking_anchor(region)
 
-    with action_col:
+    with check_col:
         if st.button("检查可用账号", key=f"{region}_check_accounts"):
             with st.spinner("正在检查当前地区账号占用情况..."):
                 availability = evaluate_region_availability(region_accounts, locks, meeting_date, start_time, end_time)
             render_availability_results(availability)
 
-    if st.button("预约会议", key=f"{region}_book_meeting", type="primary"):
+    with action_col:
+        book_clicked = st.button("预约会议", key=f"{region}_book_meeting", type="primary", use_container_width=True)
+
+    if book_clicked:
         if not topic.strip():
             st.error("请输入会议主题")
             return
