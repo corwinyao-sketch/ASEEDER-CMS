@@ -824,13 +824,19 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
     st.markdown(
         """
         <style>
+        .quick-time-strip-title {
+            margin-bottom: 0.35rem;
+        }
+        .quick-time-strip-axis {
+            margin-top: 0.25rem;
+        }
         .quick-time-label-row {
             display: grid;
             grid-template-columns: repeat(25, minmax(0, 1fr));
-            gap: 0.25rem;
-            margin-top: 0.2rem;
+            gap: 0.15rem;
+            margin-top: 0.15rem;
             color: #6b7280;
-            font-size: 0.85rem;
+            font-size: 0.75rem;
         }
         .quick-time-label-row span {
             text-align: left;
@@ -845,7 +851,12 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
         slot_minutes = slot["slot_minutes"]
         is_selected = selected_start <= slot_minutes < selected_end
         is_available = slot["available_count"] > 0
-        button_label = "■" if is_selected else "·"
+        if is_selected:
+            button_label = "🟦"
+        elif is_available:
+            button_label = "🟩"
+        else:
+            button_label = "⬜"
 
         help_parts = [
             f"时间段：{format_range(slot['slot_start'], slot['slot_end'])}",
@@ -870,16 +881,16 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
             args=(region, slot_minutes),
         )
 
-    label_html = "<div class='quick-time-label-row'>"
+    label_html = "<div class='quick-time-strip-axis'><div class='quick-time-label-row'>"
     for hour in range(25):
         label_html += f"<span>{hour}</span>"
-    label_html += "</div>"
+    label_html += "</div></div>"
     st.markdown(label_html, unsafe_allow_html=True)
 
     legend_cols = st.columns([1, 1, 6])
-    legend_cols[0].markdown("`■` 已选")
-    legend_cols[1].markdown("`·` 可选")
-    legend_cols[2].caption("灰色不可点格子表示当前半小时内没有任何可用账号。")
+    legend_cols[0].markdown("`🟦` 已选")
+    legend_cols[1].markdown("`🟩` 可选")
+    legend_cols[2].caption("`⬜` 不可用。点击一次选开始，再点一次选结束。")
 
 
 def render_persistent_calendar(region):
@@ -1117,7 +1128,7 @@ def render_region_booking(region, region_accounts, locks):
 
     topic = st.text_input("会议主题", placeholder="例如：SA meeting 4:Kelly——Qingqing", key=f"{region}_topic")
 
-    picker_col, calendar_col = st.columns([1, 1.15])
+    picker_col, calendar_col = st.columns([1.65, 0.75])
     with calendar_col:
         render_persistent_calendar(region)
 
