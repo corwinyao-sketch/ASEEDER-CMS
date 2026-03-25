@@ -734,143 +734,6 @@ def render_availability_results(availability):
                 st.write(f"{prefix} {item['account']}：{item['reason']}")
 
 
-def evaluate_availability_from_schedule_map(schedule_map, meeting_date, start_time, end_time):
-    target_start, target_end = get_booking_window(meeting_date, start_time, end_time)
-    day_start, day_end = get_day_bounds(meeting_date)
-    results = []
-
-    for account_name, schedule in sorted(schedule_map.items()):
-        day_meeting_count = len(
-            [
-                event
-                for event in schedule.get("meeting_events", [])
-                if ranges_overlap(event["start_dt"], event["end_dt"], day_start, day_end)
-            ]
-        )
-
-        if schedule.get("error"):
-            results.append(
-                {
-                    "account": account_name,
-                    "status": "error",
-                    "reason": f"拉取失败: {schedule['error']}",
-                    "meeting_count": day_meeting_count,
-                    "schedule": schedule,
-                }
-            )
-            continue
-
-        overlapping_events = filter_events_for_window(schedule.get("events", []), target_start, target_end)
-        if overlapping_events:
-            conflict = sort_events(overlapping_events)[0]
-            results.append(
-                {
-                    "account": account_name,
-                    "status": "busy",
-                    "reason": describe_conflict(conflict),
-                    "meeting_count": day_meeting_count,
-                    "schedule": schedule,
-                }
-            )
-        else:
-            results.append(
-                {
-                    "account": account_name,
-                    "status": "available",
-                    "reason": f"当天已有 {day_meeting_count} 场会议",
-                    "meeting_count": day_meeting_count,
-                    "schedule": schedule,
-                }
-            )
-
-    available_accounts = [item for item in results if item["status"] == "available"]
-    recommended = None
-    if available_accounts:
-        recommended = sorted(available_accounts, key=lambda item: (item["meeting_count"], item["account"]))[0]
-
-    return {
-        "results": results,
-        "available": available_accounts,
-        "recommended": recommended,
-        "target_start": target_start,
-        "target_end": target_end,
-    }
-
-
-def render_account_availability_preview(availability):
-    st.markdown("##### 可用账号")
-
-    available_accounts = availability["available"]
-    if not available_accounts:
-        st.warning("当前时间段没有可用账号。")
-        return
-
-    st.markdown(
-        """
-        <style>
-        .availability-chip-row {
-            display: flex;
-            gap: 0.75rem;
-            flex-wrap: wrap;
-            margin-top: 0.25rem;
-        }
-        .availability-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.55rem;
-            padding: 0.75rem 1rem;
-            border-radius: 999px;
-            border: 1px solid #d1d5db;
-            background: #ffffff;
-            color: #111827;
-            font-weight: 600;
-            min-width: 148px;
-        }
-        .availability-chip .dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 999px;
-            background: #22c55e;
-            display: inline-block;
-        }
-        .availability-chip.recommended {
-            border: 2px solid #e11d48;
-            color: #111827;
-        }
-        .availability-chip.recommended .dot {
-            background: #e11d48;
-        }
-        .availability-chip .badge {
-            margin-left: auto;
-            color: #e11d48;
-            font-weight: 700;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    recommended_account = availability["recommended"]["account"] if availability["recommended"] else None
-    chip_html = "<div class='availability-chip-row'>"
-    for item in sorted(available_accounts, key=lambda entry: (entry["account"] != recommended_account, entry["account"])):
-        recommended_class = " recommended" if item["account"] == recommended_account else ""
-        badge_html = "<span class='badge'>✓</span>" if item["account"] == recommended_account else ""
-        chip_html += (
-            f"<div class='availability-chip{recommended_class}'>"
-            f"<span class='dot'></span>"
-            f"<span>{html.escape(item['account'])}</span>"
-            f"{badge_html}"
-            f"</div>"
-        )
-    chip_html += "</div>"
-    st.markdown(chip_html, unsafe_allow_html=True)
-    st.caption(
-        f"推荐账号：{recommended_account}。按当天会议数量最少优先自动分配。"
-        if recommended_account
-        else ""
-    )
-
-
 def set_booking_time_range(region, slot_minutes, duration_minutes):
     st.session_state[f"{region}_start_time"] = minutes_to_time(slot_minutes)
     st.session_state[f"{region}_end_time"] = minutes_to_time(slot_minutes + duration_minutes)
@@ -949,11 +812,6 @@ def render_quick_time_grid(region, meeting_date, schedule_map):
 
     if anchor_minutes is not None:
         st.info(f"已选择开始时间 {minutes_to_time(anchor_minutes).strftime('%H:%M')}，请再点击一个格子作为结束时间。")
-
-    toolbar_cols = st.columns([5, 1])
-    with toolbar_cols[1]:
-        if st.button("清除选段", key=f"{region}_clear_booking_selection", use_container_width=True):
-            clear_booking_anchor(region)
 
     st.markdown(
         """
@@ -1281,15 +1139,6 @@ def render_region_booking(region, region_accounts, locks):
             f"当前选择：**{meeting_date.strftime('%Y-%m-%d')}** "
             f"**{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}**，会议时长 **{duration}** 分钟"
         )
-
-        preview_availability = evaluate_availability_from_schedule_map(
-            schedule_map,
-            meeting_date,
-            start_time,
-            end_time,
-        )
-        st.markdown("---")
-        render_account_availability_preview(preview_availability)
 
     action_col, check_col, refresh_col = st.columns([4, 2.2, 1.2])
     with refresh_col:
